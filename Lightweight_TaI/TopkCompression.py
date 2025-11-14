@@ -17,7 +17,7 @@ class TopKCompressorState():
         self.rank = rank
         # self.residual_decay = 0.99  # Decay residuals slightly each epoch
 
-    def update_ratio(self):
+    def update(self):
         self.current_epoch += 1
         # current_ratio = 1.00 - (self.current_epoch / self.warmup_epoch) * (1.00 - self.final_ratio)
         # self.ratio = max(current_ratio, self.final_ratio)
