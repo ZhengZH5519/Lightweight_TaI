@@ -5,8 +5,10 @@ from collections import defaultdict
 
 import torch
 import numpy as np
+import json
 
 import modelopt.torch.quantization as mtq
+import sys
 
 
 class EngineBuilder:
@@ -19,7 +21,7 @@ class EngineBuilder:
         valid_param_suffix=("weight", "bias"),
         engine_name="mtq_int8_fp16",
         batch_size=1,
-        max_calib_samples=300,
+        metadata=None,
         onnx_out_dir=".",
         engine_out_dir=".",
     ):
@@ -28,12 +30,11 @@ class EngineBuilder:
         if calibration_data is None:
             raise RuntimeError("Please provide calibration_data (iterable yielding tensors or (tensor, ...)).")
 
-        self.TARGET_KEYWORDS = target_keywords or ["dcn", "conv", "dconv", "mlp"]
+        self.TARGET_KEYWORDS = target_keywords
         self.STD_THRESHOLD = std_threshold
         self.VALID_PARAM_SUFFIX = valid_param_suffix
         self.engine_name = engine_name
         self.batch_size = batch_size
-        self.max_calib_samples = max_calib_samples
         self.onnx_out_dir = onnx_out_dir
         self.engine_out_dir = engine_out_dir
 
@@ -45,6 +46,7 @@ class EngineBuilder:
         self.example_inputs = None
         self.CUSTOM_CFG = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
         self.filtered_layers = []
+        self.metadata = metadata
 
         # 基本的 smoke test：验证 calibration_data 可迭代并且能做一次前向
         try:
@@ -72,10 +74,9 @@ class EngineBuilder:
     # -----------------------
     # MTQ 量化与配置生成
     # -----------------------
-    def prepare_custom_cfg_and_quantize(self, disable_conT=True, save_quant_summary_path=None):
+    def prepare_custom_cfg_and_quantize(self, save_quant_summary_path=None):
         """
         基于 model.state_dict() 找到目标层、计算 std，生成 CUSTOM_CFG 并对模型执行 mtq.quantize。
-        - disable_conT: 是否禁用 *conT* 的量化（按原逻辑）
         - save_quant_summary_path: 若提供，将把 mtq.print_quant_summary 的输出写入该文件
         返回量化后的 model
         """
@@ -84,8 +85,7 @@ class EngineBuilder:
 
         # 复制默认配置并做必要调整
         CUSTOM_CFG = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
-        if disable_conT:
-            CUSTOM_CFG["quant_cfg"]["*conT*"] = {"enable": False}
+        CUSTOM_CFG["quant_cfg"]["*conT*"] = {"enable": False}
 
         # 使用 self.state_dict 提取目标层参数
         state_dict = self.state_dict
@@ -95,7 +95,9 @@ class EngineBuilder:
             if not param_name.endswith(self.VALID_PARAM_SUFFIX):
                 continue
             layer_name = param_name.rsplit(".", 1)[0]
-            if any(keyword in layer_name.lower() for keyword in self.TARGET_KEYWORDS):
+
+            # 当 self.TARGET_KEYWORDS 为假值（None/[]/''）时，匹配所有层；否则按关键字过滤
+            if not self.TARGET_KEYWORDS or any(k.lower() in layer_name.lower() for k in self.TARGET_KEYWORDS):
                 target_layers_params[layer_name].append(param_tensor.cpu().numpy())
 
         # 计算各层标准差并筛选
@@ -250,6 +252,10 @@ class EngineBuilder:
         build = builder.build_serialized_network
         engine_file = engine_filename or os.path.join(self.engine_out_dir, f"{engine_name}_batch{batch_size}.engine")
         with build(network, config) as engine, open(engine_file, "wb") as f:
+            if self.metadata is not None:# 如果有元数据 yolo依靠这个元数据运行
+                meta = json.dumps(self.metadata)
+                f.write(len(meta).to_bytes(4, byteorder="little", signed=True))
+                f.write(meta.encode())
             f.write(engine)
         print(f"wrote engine to {engine_file}")
         return engine_file
